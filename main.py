@@ -1,160 +1,49 @@
-from fastapi import FastAPI, UploadFile
-from pydantic import BaseModel
-import os
-import torch
+import streamlit as st
+import requests
 
-from dotenv import load_dotenv
-load_dotenv()
+API_URL = "http://127.0.0.1:8000"
 
-from backend.services.pdf_loader import load_pdf
-from backend.services.chunker import chunk_text
-from backend.services.embeddings import get_embeddings
-from backend.services.vector_store import VectorStore
+st.set_page_config(page_title="AI Chatbot", page_icon="🤖")
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+st.title("🤖 AI RAG Chatbot")
+st.write("Upload PDF and ask questions")
 
-# -----------------------------
-# APP INIT
-# -----------------------------
-app = FastAPI()
+# -------------------------
+# PDF UPLOAD
+# -------------------------
+st.header("📄 Upload PDF")
 
-# -----------------------------
-# CPU OPTIMIZATION
-# -----------------------------
-device = "cpu"
-torch.set_num_threads(os.cpu_count())
+uploaded_file = st.file_uploader("Choose PDF file", type=["pdf"])
 
-print("⚡ Optimized Mistral CPU mode")
-print("CPU Cores:", os.cpu_count())
+if uploaded_file is not None:
+    files = {"file": uploaded_file.getvalue()}
 
-# -----------------------------
-# STORAGE
-# -----------------------------
-UPLOAD_FOLDER = "data/pdfs"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    with st.spinner("Uploading..."):
+        response = requests.post(f"{API_URL}/upload", files={"file": uploaded_file})
 
-vector_store = VectorStore(dim=384)
+    st.success("Uploaded Successfully")
+    st.json(response.json())
 
-# -----------------------------
-# MODEL SETUP
-# -----------------------------
-model_id = "mistralai/Mistral-7B-Instruct-v0.2"
+# -------------------------
+# CHAT SECTION
+# -------------------------
+st.header("💬 Ask Questions")
 
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-tokenizer.pad_token = tokenizer.eos_token
+question = st.text_input("Enter your question")
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    torch_dtype=torch.float32,
-    low_cpu_mem_usage=True
-).to(device)
+if st.button("Ask"):
+    if question:
 
-model.eval()
-
-# -----------------------------
-# HOME
-# -----------------------------
-@app.get("/")
-def home():
-    return {"message": "⚡ Fast Mistral chatbot running"}
-
-# -----------------------------
-# UPLOAD PDF
-# -----------------------------
-@app.post("/upload")
-async def upload_pdf(file: UploadFile):
-    try:
-        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
-
-        text = load_pdf(file_path)
-        if not text:
-            return {"error": "No text extracted from PDF"}
-
-        chunks = chunk_text(text)
-        if not chunks:
-            return {"error": "Chunking failed"}
-
-        embeddings = get_embeddings(chunks)
-        vector_store.add(embeddings, chunks)
-
-        return {
-            "filename": file.filename,
-            "chunks": len(chunks),
-            "message": "PDF uploaded successfully"
-        }
-
-    except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        return {"error": str(e)}
-
-# -----------------------------
-# REQUEST MODEL
-# -----------------------------
-class QueryRequest(BaseModel):
-    question: str
-
-# -----------------------------
-# CHAT API (IMPROVED)
-# -----------------------------
-@app.post("/chat")
-def chat(query: QueryRequest):
-    try:
-        # 1. Retrieve context (fast)
-        query_embedding = get_embeddings([query.question])[0]
-        chunks = vector_store.search(query_embedding, k=1)
-
-        context = chunks[0] if chunks else "No relevant context available"
-
-        # 2. Better prompt (less echo)
-        prompt = f"Answer clearly using context.\n\nContext: {context}\n\nQ: {query.question}\nA:"
-
-        # 3. Tokenize
-        inputs = tokenizer(prompt, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        # 4. Generate (FIXED)
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=80,   # 🔥 FIX: prevent cut answers
-                do_sample=False,
-                use_cache=True,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id
+        with st.spinner("Thinking..."):
+            response = requests.post(
+                f"{API_URL}/chat",
+                json={"question": question}
             )
 
-        # 5. Decode
-        full_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        data = response.json()
 
-        # 🔥 STRONG CLEANING
-        if "A:" in full_output:
-            answer = full_output.split("A:")[-1]
-        else:
-            answer = full_output
+        st.subheader("Answer:")
+        st.write(data.get("answer", "No answer"))
 
-        # remove noise
-        for bad in ["Context:", "Q:", "Question:"]:
-            if bad in answer:
-                answer = answer.split(bad)[0]
-
-        # clean + first line only
-        answer = answer.strip().split("\n")[0]
-
-        # ensure proper ending
-        if not answer.endswith("."):
-            answer += "."
-
-        return {
-            "question": query.question,
-            "answer": answer,
-            "relevant_chunks": chunks
-        }
-
-    except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        return {"error": str(e)}
+        st.subheader("Relevant Context:")
+        st.write(data.get("relevant_chunks", []))
