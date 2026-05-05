@@ -6,10 +6,10 @@ import torch
 from dotenv import load_dotenv
 load_dotenv()
 
-from backend.services.pdf_loader import load_pdf
-from backend.services.chunker import chunk_text
-from backend.services.embeddings import get_embeddings
-from backend.services.vector_store import VectorStore
+from services.pdf_loader import load_pdf
+from services.chunker import chunk_text
+from services.embeddings import get_embeddings
+from services.vector_store import VectorStore
 
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
